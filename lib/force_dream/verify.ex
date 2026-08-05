@@ -79,6 +79,37 @@ defmodule ForceDream.Verify do
     binary_part(der, byte_size(der) - 32, 32)
   end
 
+  @doc """
+  Exact replica of the server's verifyMerkleInclusion. Each sibling carries its own
+  position, so ordering is never derived from leaf_index. Hashing is over concatenated
+  HEX STRINGS, not raw bytes -- matching the server exactly. An empty sibling list
+  means the root is the leaf digest unchanged (the batch_size == 1 case, which is every
+  real proof the platform has emitted to date).
+  """
+  def verify_merkle_inclusion(leaf_hash, siblings, expected_root) when is_list(siblings) do
+    computed =
+      Enum.reduce_while(siblings, leaf_hash, fn step, current ->
+        case step do
+          %{"hash" => h} when is_binary(h) ->
+            next =
+              if Map.get(step, "position") == "right" do
+                Canonical.sha256_hex(current <> h)
+              else
+                Canonical.sha256_hex(h <> current)
+              end
+
+            {:cont, next}
+
+          _ ->
+            {:halt, :invalid}
+        end
+      end)
+
+    computed == expected_root
+  end
+
+  def verify_merkle_inclusion(_, _, _), do: false
+
   def verify_proof(api_base, opts \\ []) do
     task_id = Keyword.get(opts, :task_id)
     proof_input = Keyword.get(opts, :proof)
@@ -108,14 +139,38 @@ defmodule ForceDream.Verify do
         signature_b64 = Map.get(proof, "signature")
         algorithm = Map.get(proof, "algorithm")
 
-        if signature_b64 && (is_nil(algorithm) || algorithm == "Ed25519") do
-          raw_key_bytes = public_key_bytes_from_pem(pem)
-          sig_bytes = Base.decode64!(signature_b64)
-          digest_bytes = Base.decode16!(digest_hex, case: :lower)
+        cond do
+          is_nil(signature_b64) ->
+            false
 
-          :crypto.verify(:eddsa, :none, digest_bytes, sig_bytes, [raw_key_bytes, :ed25519])
-        else
-          false
+          algorithm == "Ed25519-batched" ->
+            # A batched proof is only as strong as this real double-check: the digest
+            # must genuinely be a leaf of the claimed root, verified BEFORE the
+            # signature is trusted. The signature is over the ROOT, not the digest.
+            root = Map.get(proof, "merkle_root")
+            inclusion = Map.get(proof, "inclusion_proof")
+            siblings = if is_map(inclusion), do: Map.get(inclusion, "siblings"), else: nil
+
+            if is_binary(root) and root != "" and is_list(siblings) and
+                 verify_merkle_inclusion(digest_hex, siblings, root) do
+              raw_key_bytes = public_key_bytes_from_pem(pem)
+              sig_bytes = Base.decode64!(signature_b64)
+              root_bytes = Base.decode16!(root, case: :lower)
+
+              :crypto.verify(:eddsa, :none, root_bytes, sig_bytes, [raw_key_bytes, :ed25519])
+            else
+              false
+            end
+
+          is_nil(algorithm) or algorithm == "Ed25519" ->
+            raw_key_bytes = public_key_bytes_from_pem(pem)
+            sig_bytes = Base.decode64!(signature_b64)
+            digest_bytes = Base.decode16!(digest_hex, case: :lower)
+
+            :crypto.verify(:eddsa, :none, digest_bytes, sig_bytes, [raw_key_bytes, :ed25519])
+
+          true ->
+            false
         end
       rescue
         _ -> false
@@ -125,7 +180,7 @@ defmodule ForceDream.Verify do
       verified: verified,
       task_id: Map.get(proof, "task_id"),
       key_id: key_id,
-      algorithm: "Ed25519",
+      algorithm: Map.get(proof, "algorithm") || "Ed25519",
       fields_signed: field_count,
       trustless: true,
       message:
