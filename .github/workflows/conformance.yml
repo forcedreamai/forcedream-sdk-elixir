@@ -1,0 +1,34 @@
+name: conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  conformance:
+    name: Verification conformance (7 reference cases)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.17'
+          otp-version: '27'
+      - run: mix deps.get
+      - run: mix compile
+      - name: Fetch verification specification
+        uses: actions/checkout@v4
+        with:
+          repository: forcedreamai/forcedream-sdk-conformance
+          path: .conformance
+      - name: Start mock server
+        run: |
+          python3 .conformance/harness/mock_server.py &
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8787/v1/workforce/proof/public-key >/dev/null && break
+            sleep 0.5
+          done
+      - name: Run conformance suite
+        run: mix run examples/conformance.exs
