@@ -35,7 +35,18 @@ defmodule ForceDream.Verify do
         |> Map.put("external_cost_hash", string_value(Map.get(proof, "external_cost_hash")))
         |> Map.put("retrieved_count", number_or_zero(Map.get(proof, "retrieved_count", 0)))
 
-      {base, 10}
+      # Model binding: the server records which provider and model actually served the
+      # execution and binds them into the signed payload. Conditional, so a proof issued
+      # before this existed canonicalises exactly as it did then.
+      {base, n} =
+        Enum.reduce(["inference_provider", "inference_model"], {base, 10}, fn key, {acc, count} ->
+          case Map.get(proof, key) do
+            nil -> {acc, count}
+            v -> {Map.put(acc, key, string_value(v)), count + 1}
+          end
+        end)
+
+      {base, n}
     else
       {base, 8}
     end
